@@ -1,0 +1,23 @@
+[package]
+name = "history-grep"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+debug = true
+
+[[bin]]
+name = "hgr"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.98"
+chrono = "0.4.40"
+clap = { version = "4.5.37", features = ["derive"] }
+itertools = "0.14.0"
+log = "0.4.27"
+regex = "1.11.1"
+stderrlog = "0.6.0"
