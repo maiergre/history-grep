@@ -1,12 +1,12 @@
-use std::io::Write;
 use std::num::ParseIntError;
 
 use anyhow::Context;
-use base64::prelude::BASE64_STANDARD;
-use base64::Engine as _;
 use chrono::DateTime;
 use chrono::Utc;
 use clap::Parser;
+use crossterm::clipboard::CopyToClipboard;
+use crossterm::execute;
+use crossterm::tty::IsTty as _;
 use histfile::open_and_parse_history_file;
 use regex::Regex;
 use regex::RegexBuilder;
@@ -107,19 +107,13 @@ pub fn actual_main() -> Result<(), anyhow::Error> {
             ));
         }
         let cmd = entries[idx].lines.join("\n");
-        // Use the OSC52 ANSI sequence to copy the history entry to the
-        // clipboard:
-        // `\x1b]52`: 0x1b is ESC, followed by `]52`. The a `;` then the
-        // clipboard to use (usually just `c`), another `;` followed by
-        // the base64 encoded data to be copied and finally a `BEL` (0x7)
-        let mut osc52_copy_seq = "\x1b]52;c;".as_bytes().to_vec();
-        // base64 encoded command
-        let encoded = BASE64_STANDARD.encode(&cmd);
-        osc52_copy_seq.extend_from_slice(encoded.as_bytes());
-        osc52_copy_seq.push(0x7);
         println!("{}", cmd);
-        std::io::stdout().write_all(&osc52_copy_seq).unwrap();
-        println!("Copied to clipboard");
+        if std::io::stdout().is_tty() {
+            execute!(std::io::stdout(), CopyToClipboard::to_clipboard_from(cmd))?;
+            println!("Copied to clipboard");
+        } else {
+            log::warn!("Cannot copy to clipboard. Not a TTY");
+        }
         return Ok(());
     }
 

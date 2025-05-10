@@ -24,7 +24,7 @@ pub fn open_and_parse_history_file(histfile: &str) -> anyhow::Result<Vec<HistEnt
 /// The parsing logic supports bash like timestamps. I.e., lines starting with
 /// a `#` followed by only digits. The general logic as as folows:
 /// * If we haven't read any timestamps yet, assume every line is a separate
-///    command.
+///   command.
 /// * Once we have read at least one timestamp, we expect that each history
 ///   entry begins with a timestamp line and is followed by one or more
 ///   command lines. I.e., in this state we support multi-line commands.
@@ -324,5 +324,7 @@ mod test {
     }
 
     #[test]
-    fn test_matches() {}
+    fn test_matches() {
+        todo!()
+    }
 }
