@@ -31,7 +31,8 @@ pub fn open_and_parse_history_file(histfile: &str) -> anyhow::Result<Vec<HistEnt
 pub fn parse_history_file(read: impl std::io::Read) -> anyhow::Result<Vec<HistEntry>> {
     let mut ret = Vec::new();
     let mut state = FileParseState::NoTimestamps;
-    let mut cur_entry = HistEntry::with_ts(default_ts());
+    let mut cur_ts = default_ts();
+    let mut cur_lines = vec![];
 
     let reader = BufReader::new(read);
     for (mut line_no, line) in reader.lines().enumerate() {
@@ -45,18 +46,18 @@ pub fn parse_history_file(read: impl std::io::Read) -> anyhow::Result<Vec<HistEn
                 // No timestamp yet. Assume each line in the file is a single command
                 ret.push(HistEntry {
                     ts: default_ts(),
-                    lines: vec![cmd],
+                    command: cmd,
                 });
                 FileParseState::NoTimestamps
             }
             (FileParseState::NoTimestamps, ParsedLine::Timestamp(ts)) => {
                 // Got our first timestamp
-                cur_entry.ts = ts;
+                cur_ts = ts;
                 FileParseState::LastWasTimestamp
             }
             (FileParseState::LastWasTimestamp, ParsedLine::Command(cmd))
             | (FileParseState::LastWasCommand, ParsedLine::Command(cmd)) => {
-                cur_entry.lines.push(cmd);
+                cur_lines.push(cmd);
                 FileParseState::LastWasCommand
             }
             (FileParseState::LastWasTimestamp, ParsedLine::Timestamp(_ts)) => {
@@ -70,55 +71,70 @@ pub fn parse_history_file(read: impl std::io::Read) -> anyhow::Result<Vec<HistEn
                 FileParseState::LastWasTimestamp
             }
             (FileParseState::LastWasCommand, ParsedLine::Timestamp(ts)) => {
-                ret.push(cur_entry);
-                cur_entry = HistEntry::with_ts(ts);
+                ret.push(HistEntry {
+                    ts: cur_ts,
+                    command: cur_lines.join("\n"),
+                });
+                cur_ts = ts;
+                cur_lines.clear();
                 FileParseState::LastWasTimestamp
             }
         }
     }
     if state == FileParseState::LastWasCommand {
         // Need to flush the last command
-        ret.push(cur_entry);
+        ret.push(HistEntry {
+            ts: cur_ts,
+            command: cur_lines.join("\n"),
+        });
     }
 
     Ok(ret)
+}
+
+/// Deduplicate consecutive history entries that have the same command.
+/// The first instance of the command is retained.
+pub fn dedup_entries(entries: Vec<HistEntry>) -> Vec<HistEntry> {
+    let mut ret: Vec<HistEntry> = Vec::with_capacity(entries.len());
+    if entries.is_empty() {
+        return entries;
+    }
+    for e in entries.into_iter() {
+        if ret.last().is_some_and(|prev| prev.command == e.command) {
+            continue;
+        }
+        ret.push(e);
+    }
+    ret
 }
 
 /// Represents a history entry
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct HistEntry {
     pub ts: DateTime<Utc>,
-    pub lines: Vec<String>,
+    pub command: String,
 }
 
 impl HistEntry {
-    pub fn with_ts(ts: DateTime<Utc>) -> Self {
-        HistEntry {
-            ts,
-            lines: Vec::new(),
-        }
-    }
-
     /// Check if this entry matches the search criteria.
     ///
     /// In order to be considered a match, this entry must match *all* regexes
     /// from `include_re` and it must not match *any* regex from `exclude_re`
     pub fn matches(&self, include_re: &[Regex], exclude_re: &[Regex]) -> bool {
-        let command: &str = if self.lines.len() == 1 {
-            &self.lines[0]
-        } else {
-            &self.lines.join("\n")
-        };
-        include_re.iter().all(|re| re.is_match(command))
-            && !exclude_re.iter().any(|re| re.is_match(command))
+        include_re.iter().all(|re| re.is_match(&self.command))
+            && !exclude_re.iter().any(|re| re.is_match(&self.command))
+    }
+
+    pub fn ts_as_string(&self) -> String {
+        let local_time = DateTime::<Local>::from(self.ts);
+        let formatted_time = local_time.format("%Y-%m-%d %H:%M:%S");
+        formatted_time.to_string()
     }
 }
 
 impl Display for HistEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let local_time = DateTime::<Local>::from(self.ts);
-        let formatted_time = local_time.format("%Y-%m-%d %H:%M:%S");
-        write!(f, "{}   {}", formatted_time, self.lines.join("\n"))
+        write!(f, "{}   {}", self.ts_as_string(), self.command)
     }
 }
 
@@ -162,11 +178,18 @@ impl ParsedLine {
 
 #[cfg(test)]
 mod test {
-    use itertools::Itertools;
+    use chrono::Duration;
 
     use crate::default_ts;
 
     use super::*;
+
+    pub fn newentry(ts: DateTime<Utc>, command: &str) -> HistEntry {
+        HistEntry {
+            ts,
+            command: command.to_owned(),
+        }
+    }
 
     #[test]
     fn test_parse_line() {
@@ -225,7 +248,7 @@ mod test {
     fn test_parse_file_no_timestamp() {
         let mkentry = |cmd: &str| HistEntry {
             ts: default_ts(),
-            lines: vec![cmd.to_owned()],
+            command: cmd.to_owned(),
         };
         let expected = vec![mkentry("foo"), mkentry("bar"), mkentry("foobar baz")];
         let hist = "foo\nbar\nfoobar baz\n".as_bytes();
@@ -240,11 +263,11 @@ mod test {
     fn test_parse_file_timestamps() {
         let mkentry = |ts, cmd: &str| HistEntry {
             ts: DateTime::from_timestamp(ts, 0).unwrap(),
-            lines: vec![cmd.to_owned()],
+            command: cmd.to_owned(),
         };
         let mkmultiline = |ts, cmds: &[&str]| HistEntry {
             ts: DateTime::from_timestamp(ts, 0).unwrap(),
-            lines: cmds.iter().map(|s| s.to_string()).collect_vec(),
+            command: cmds.join("\n"),
         };
         // First commands have not timestamps, then we use timestamps
         let hist = "foo\n\
@@ -306,11 +329,11 @@ mod test {
     fn test_parse_file_timestamps_and_whitespace() {
         let mkentry = |ts, cmd: &str| HistEntry {
             ts: DateTime::from_timestamp(ts, 0).unwrap(),
-            lines: vec![cmd.to_owned()],
+            command: cmd.to_owned(),
         };
         let mkmultiline = |ts, cmds: &[&str]| HistEntry {
             ts: DateTime::from_timestamp(ts, 0).unwrap(),
-            lines: cmds.iter().map(|s| s.to_string()).collect_vec(),
+            command: cmds.join("\n"),
         };
         let hist = "#1262305001\nfoobar \n#1262305005\n\nbar bar bar\n\n".as_bytes();
         let res = parse_history_file(hist).unwrap();
@@ -325,6 +348,44 @@ mod test {
 
     #[test]
     fn test_matches() {
-        todo!()
+        let mk_re = |p: &str| Regex::new(p).unwrap();
+        let entry = HistEntry {
+            ts: default_ts(),
+            command: "I am the command\nwith many lines. Foobar".to_owned(),
+        };
+        assert!(entry.matches(&[mk_re("am the"), mk_re("many")], &[]));
+        assert!(entry.matches(&[], &[]));
+        assert!(!entry.matches(&[], &[mk_re("many")]));
+        assert!(!entry.matches(&[], &[mk_re("many"), mk_re("XXXX")]));
+        assert!(!entry.matches(
+            &[mk_re("am the"), mk_re("many")],
+            &[mk_re("many"), mk_re("XXXX")]
+        ));
+        assert!(!entry.matches(&[mk_re("am the"), mk_re("XXX")], &[]));
+        assert!(entry.matches(&[mk_re("am the"), mk_re("am the")], &[]));
+    }
+
+    #[test]
+    fn test_dedup_entries() {
+        let t0 = default_ts();
+        let t1 = default_ts() + Duration::minutes(5);
+        let t2 = default_ts() + Duration::minutes(10);
+        let t3 = default_ts() + Duration::minutes(12);
+        let t4 = default_ts() + Duration::minutes(23);
+        let orig = vec![
+            newentry(t0, "ls -la"),
+            newentry(t1, "rm foobar"),
+            newentry(t2, "rm foobar"),
+            newentry(t3, "rm foobar"),
+            newentry(t4, "ls -la"),
+        ];
+        assert_eq!(
+            dedup_entries(orig),
+            vec![
+                newentry(t0, "ls -la"),
+                newentry(t1, "rm foobar"),
+                newentry(t4, "ls -la"),
+            ]
+        );
     }
 }

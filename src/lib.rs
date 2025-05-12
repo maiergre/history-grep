@@ -1,18 +1,22 @@
+use std::io::Write;
 use std::num::ParseIntError;
 
+use anyhow::anyhow;
 use anyhow::Context;
+use base64::prelude::BASE64_STANDARD;
 use chrono::DateTime;
 use chrono::Utc;
 use clap::Parser;
-use crossterm::clipboard::CopyToClipboard;
-use crossterm::execute;
-use crossterm::tty::IsTty as _;
+use histfile::dedup_entries;
 use histfile::open_and_parse_history_file;
+use interactive::run_interactive;
+use ratatui::crossterm::tty::IsTty as _;
 use regex::Regex;
 use regex::RegexBuilder;
 use stderrlog::LogLevelNum;
 
 mod histfile;
+mod interactive;
 
 /// Assume any "timestamps" we parse before that date are not actually
 /// valid.
@@ -43,10 +47,18 @@ pub struct Args {
     #[arg(short = 'f', long)]
     histfile: Option<String>,
 
+    /// If set, do *not* de-duplicate repeated commands
+    #[arg(long)]
+    no_dedup: bool,
+
     /// Gets the history entry with `ID` from the history file, prints it, and
     /// copies it to the clipboard.
     #[arg(long, visible_alias = "cp", value_name = "ID", value_parser = parse_hex_to_usize)]
     copy: Option<usize>,
+
+    /// asdf
+    #[arg(short = 'i', long, conflicts_with = "copy")]
+    interactive: bool,
 
     /// Use case-sensitive search. Default is non-sensitive
     #[arg(short = 's', long, conflicts_with = "copy")]
@@ -79,10 +91,6 @@ pub fn actual_main() -> Result<(), anyhow::Error> {
         .init()
         .expect("Failed to setup logging");
 
-    let case_mode = CaseMode::from_sensitive(args.case_sensitive);
-    let inc_patterns = process_patterns(args.patterns, case_mode)?;
-    let excl_patterns = process_patterns(args.exclude, case_mode)?;
-
     let histfile = match args.histfile {
         Some(histfile) => histfile,
         None => match std::env::var("HISTFILE") {
@@ -96,7 +104,19 @@ pub fn actual_main() -> Result<(), anyhow::Error> {
     };
 
     let entries = open_and_parse_history_file(&histfile)?;
-    log::debug!("Read {} history entries", entries.len());
+    let entries = if args.no_dedup {
+        log::debug!("Read {} history entries", entries.len());
+        entries
+    } else {
+        let orig_len = entries.len();
+        let deduped = dedup_entries(entries);
+        log::debug!(
+            "Read {} history entries, {} entries after dedup",
+            orig_len,
+            deduped.len()
+        );
+        deduped
+    };
 
     if let Some(idx) = args.copy {
         if idx >= entries.len() {
@@ -106,10 +126,10 @@ pub fn actual_main() -> Result<(), anyhow::Error> {
                 entries.len()
             ));
         }
-        let cmd = entries[idx].lines.join("\n");
+        let cmd = &entries[idx].command;
         println!("{}", cmd);
         if std::io::stdout().is_tty() {
-            execute!(std::io::stdout(), CopyToClipboard::to_clipboard_from(cmd))?;
+            std::io::stdout().write_all(&copy_to_clipboard_seq(cmd))?;
             println!("Copied to clipboard");
         } else {
             log::warn!("Cannot copy to clipboard. Not a TTY");
@@ -117,13 +137,46 @@ pub fn actual_main() -> Result<(), anyhow::Error> {
         return Ok(());
     }
 
-    for (idx, entry) in entries.iter().enumerate() {
-        if entry.matches(&inc_patterns, &excl_patterns) {
-            println!("{:x} {}", idx, entry);
+    let case_mode = CaseMode::from_sensitive(args.case_sensitive);
+    let excl_patterns = process_magic_patterns(args.exclude, case_mode)?;
+
+    if args.interactive {
+        if !std::io::stdout().is_tty() {
+            return Err(anyhow!("stdout is not a TTY. Cannot use interactive mode"));
+        }
+        let initial_search = args.patterns.join(" ");
+        let selected = run_interactive(entries, initial_search, excl_patterns, case_mode)?;
+        if let Some(selected) = selected {
+            println!("{}", selected.command);
+            std::io::stdout().write_all(&copy_to_clipboard_seq(&selected.command))?;
+            println!("Copied to clipboard");
+        }
+    } else {
+        let inc_patterns = process_magic_patterns(args.patterns, case_mode)?;
+        for (idx, entry) in entries.iter().enumerate() {
+            if entry.matches(&inc_patterns, &excl_patterns) {
+                println!("{:x} {}", idx, entry);
+            }
         }
     }
-
     Ok(())
+}
+
+pub fn copy_to_clipboard_seq(s: &str) -> Vec<u8> {
+    use base64::Engine as _;
+
+    // Use the OSC52 ANSI sequence to copy the history entry to the
+    // clipboard:
+    // `\x1b]52`: 0x1b is ESC, followed by `]52`, followed by `;`
+    // Followe by the clipboard to copy to (`c` is the only one that's widely
+    // supported), followed by another `;` followed by
+    // the base64 encoded data to be copied and finally a `BEL` (0x7)
+    let mut osc52_copy_seq = "\x1b]52;c;".as_bytes().to_vec();
+    // base64 encoded string
+    let encoded = BASE64_STANDARD.encode(s);
+    osc52_copy_seq.extend_from_slice(encoded.as_bytes());
+    osc52_copy_seq.push(0x7);
+    osc52_copy_seq
 }
 
 /// If searches are case-sensitive or case-insensitive
@@ -147,27 +200,40 @@ impl CaseMode {
 /// is enclosed in slashes, e.g., `/foo[Bb]ar/` it's assumed to be a regex.
 /// Otherwise its interpreted as a "fixed" pattern.
 ///
-pub fn pattern_to_regex(s: &str, case_mode: CaseMode) -> Result<Regex, regex::Error> {
-    let pattern = if let Some(pattern) = s.strip_prefix("/").and_then(|s| s.strip_suffix("/")) {
-        log::debug!("Pattern `{}` is a regex pattern", s);
+pub fn magic_pattern_to_regex(magic_pat: &str, case_mode: CaseMode) -> Result<Regex, regex::Error> {
+    let pattern = if let Some(pattern) = magic_pat
+        .strip_prefix("/")
+        .and_then(|s| s.strip_suffix("/"))
+    {
+        log::debug!("Pattern `{}` is a regex pattern", magic_pat);
         pattern.to_owned()
     } else {
-        log::debug!("Pattern `{}` is fixed", s);
-        regex::escape(s)
+        log::debug!("Pattern `{}` is fixed", magic_pat);
+        regex::escape(magic_pat)
     };
-    RegexBuilder::new(&pattern)
+    raw_pattern_to_regex(&pattern, case_mode)
+}
+
+/// Convert a raw pattern into a regex. No processing is performed on the patterns,
+/// we just use it as-is.
+pub fn raw_pattern_to_regex(pattern: &str, case_mode: CaseMode) -> Result<Regex, regex::Error> {
+    RegexBuilder::new(pattern)
         .case_insensitive(case_mode == CaseMode::Insensitive)
         .unicode(true)
         .build()
 }
 
-/// Convert a Vec of patterns to a Vec of regexes
-pub fn process_patterns(patterns: Vec<String>, case_mode: CaseMode) -> anyhow::Result<Vec<Regex>> {
-    patterns
+/// Convert a Vec of magic patterns to a Vec of regexes
+pub fn process_magic_patterns(
+    magic_patterns: Vec<String>,
+    case_mode: CaseMode,
+) -> anyhow::Result<Vec<Regex>> {
+    magic_patterns
         .iter()
         .map(|s| {
             log::debug!("Include pattern `{}` as `{:?}`", s, case_mode);
-            pattern_to_regex(s, case_mode).with_context(|| format!("Error parsing pattern `{}`", s))
+            magic_pattern_to_regex(s, case_mode)
+                .with_context(|| format!("Error parsing pattern `{}`", s))
         })
         .collect()
 }
@@ -179,7 +245,7 @@ mod test {
     #[test]
     fn test_string_to_regex() {
         // Exact match
-        let re = pattern_to_regex("/fo.o", CaseMode::Sensitive).unwrap();
+        let re = magic_pattern_to_regex("/fo.o", CaseMode::Sensitive).unwrap();
         assert!(re.is_match("/fo.o"));
         assert!(!re.is_match("/Fo.o"));
         assert!(!re.is_match("/foxo"));
@@ -187,7 +253,7 @@ mod test {
         assert!(re.is_match("X/fo.oX"));
 
         // regex
-        let re = pattern_to_regex("/fo.o/", CaseMode::Sensitive).unwrap();
+        let re = magic_pattern_to_regex("/fo.o/", CaseMode::Sensitive).unwrap();
         assert!(re.is_match("fo.o"));
         assert!(!re.is_match("Fo.o"));
         assert!(re.is_match("foxo"));
@@ -197,40 +263,40 @@ mod test {
         assert!(re.is_match("XfoooX"));
 
         // Regex with interior slash
-        let re = pattern_to_regex("/abc/f[o]+.ar/", CaseMode::Sensitive).unwrap();
+        let re = magic_pattern_to_regex("/abc/f[o]+.ar/", CaseMode::Sensitive).unwrap();
         assert!(re.is_match("abc/foobar"));
         assert!(re.is_match("abc/foXar"));
         assert!(!re.is_match("abc_foobar"));
 
         //  Exact match
-        let re = pattern_to_regex("asd[12]", CaseMode::Sensitive).unwrap();
+        let re = magic_pattern_to_regex("asd[12]", CaseMode::Sensitive).unwrap();
         assert!(re.is_match("asd[12]"));
         assert!(!re.is_match("aSd[12]"));
         assert!(!re.is_match("asd1"));
 
         //  Exact match
-        let re = pattern_to_regex("/asd[12]/", CaseMode::Sensitive).unwrap();
+        let re = magic_pattern_to_regex("/asd[12]/", CaseMode::Sensitive).unwrap();
         assert!(!re.is_match("asd[12]"));
         assert!(re.is_match("asd1"));
         assert!(re.is_match("asd2"));
         assert!(re.is_match("_asd2_"));
 
         // anchor
-        let re = pattern_to_regex("/^asd/", CaseMode::Sensitive).unwrap();
+        let re = magic_pattern_to_regex("/^asd/", CaseMode::Sensitive).unwrap();
         assert!(re.is_match("asd__"));
         assert!(!re.is_match("_asd__"));
 
         // case senitivity
-        let re = pattern_to_regex("asDf", CaseMode::Sensitive).unwrap();
+        let re = magic_pattern_to_regex("asDf", CaseMode::Sensitive).unwrap();
         assert!(!re.is_match("XasdfX"));
         assert!(re.is_match("XasDfX"));
-        let re = pattern_to_regex("asdf", CaseMode::Insensitive).unwrap();
+        let re = magic_pattern_to_regex("asdf", CaseMode::Insensitive).unwrap();
         assert!(re.is_match("aSDf"));
         assert!(re.is_match("asdf"));
-        let re = pattern_to_regex("/asDf/", CaseMode::Sensitive).unwrap();
+        let re = magic_pattern_to_regex("/asDf/", CaseMode::Sensitive).unwrap();
         assert!(!re.is_match("XasdfX"));
         assert!(re.is_match("XasDfX"));
-        let re = pattern_to_regex("/asdf/", CaseMode::Insensitive).unwrap();
+        let re = magic_pattern_to_regex("/asdf/", CaseMode::Insensitive).unwrap();
         assert!(re.is_match("aSDf"));
         assert!(re.is_match("asdf"));
     }
