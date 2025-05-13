@@ -1,8 +1,8 @@
 use std::io::Write;
 use std::num::ParseIntError;
 
-use anyhow::anyhow;
 use anyhow::Context;
+use anyhow::anyhow;
 use base64::prelude::BASE64_STANDARD;
 use chrono::DateTime;
 use chrono::Utc;
@@ -31,13 +31,14 @@ fn parse_hex_to_usize(s: &str) -> Result<usize, ParseIntError> {
     usize::from_str_radix(s, 16)
 }
 
-#[derive(clap::Parser)]
 /// History Grep (hgr) -- A simple tool for searching through (bash) command
 /// history files.
 ///
 /// The output is similar to bash's `history`: `<ID> <DATE> <COMMAND>`
 /// WARNING: The ID is different from the one bash uses/produces and as such
 /// it must not be used with `!` history expansion.
+#[derive(clap::Parser)]
+#[command(version)]
 pub struct Args {
     /// Increase debug level
     #[arg(short, long, action=clap::ArgAction::Count)]
@@ -56,9 +57,23 @@ pub struct Args {
     #[arg(long, visible_alias = "cp", value_name = "ID", value_parser = parse_hex_to_usize)]
     copy: Option<usize>,
 
-    /// asdf
+    /// Run interactive mode.
+    ///
+    /// Interactive mode allows interactive filtering and selection of a history entry.
+    /// Type search terms separated by spaces (see `patterns`), however, no regexes are
+    /// supported at this time. The list of history entries will be interactively filtered.
+    /// Use arrow keys and PgUp/PgDown to navigate. Esc to quit, Enter to select an entry.
+    ///
+    /// [PATTERNS] are used as the initial search terms (again, no regex support though)
+    ///
+    /// The selected entry will be printed and copied to the clipboard
     #[arg(short = 'i', long, conflicts_with = "copy")]
     interactive: bool,
+
+    /// This is supposed to help to integrate with bash's `bind -x` readline support, but
+    /// it's not working right.
+    #[arg(long, conflicts_with = "copy")]
+    bash_readline_mode: Option<String>,
 
     /// Use case-sensitive search. Default is non-sensitive
     #[arg(short = 's', long, conflicts_with = "copy")]
@@ -98,7 +113,7 @@ pub fn actual_main() -> Result<(), anyhow::Error> {
             Err(_) => {
                 return Err(anyhow::Error::msg(
                     "No histfile argument given and no `HISTFILE` environment variable",
-                ))
+                ));
             }
         },
     };
@@ -127,7 +142,6 @@ pub fn actual_main() -> Result<(), anyhow::Error> {
             ));
         }
         let cmd = &entries[idx].command;
-        println!("{}", cmd);
         if std::io::stdout().is_tty() {
             std::io::stdout().write_all(&copy_to_clipboard_seq(cmd))?;
             println!("Copied to clipboard");
@@ -140,7 +154,21 @@ pub fn actual_main() -> Result<(), anyhow::Error> {
     let case_mode = CaseMode::from_sensitive(args.case_sensitive);
     let excl_patterns = process_magic_patterns(args.exclude, case_mode)?;
 
-    if args.interactive {
+    if let Some(output) = args.bash_readline_mode {
+        log::debug!("Using bash_readline_mode output file `{}`", output);
+        let mut fp = std::fs::File::options()
+            .append(true)
+            .open(&output)
+            .with_context(|| format!("Opening bash-readline-mode output file `{}`", &output))?;
+        let initial_search = std::env::var("READLINE_LINE").unwrap_or_default();
+
+        let selected = run_interactive(entries, initial_search.clone(), excl_patterns, case_mode)?;
+
+        if let Some(selected) = selected {
+            log::debug!("Selected command is `{}`", selected.command);
+            fp.write_all(selected.command.as_bytes())?;
+        }
+    } else if args.interactive {
         if !std::io::stdout().is_tty() {
             return Err(anyhow!("stdout is not a TTY. Cannot use interactive mode"));
         }

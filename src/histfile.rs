@@ -7,6 +7,7 @@ use anyhow::Context;
 use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
+use itertools::Itertools;
 use regex::Regex;
 
 use crate::default_ts;
@@ -89,7 +90,20 @@ pub fn parse_history_file(read: impl std::io::Read) -> anyhow::Result<Vec<HistEn
         });
     }
 
-    Ok(ret)
+    Ok(ret
+        .into_iter()
+        .filter(|e| {
+            let has_control_chars = e
+                .command
+                .chars()
+                .any(|c| c.is_ascii_control() && c != 0x0a as char);
+            if has_control_chars || e.command.is_empty() {
+                log::info!("FOO FOO {:?} has controls chars or is empty", e);
+                return false;
+            }
+            true
+        })
+        .collect_vec())
 }
 
 /// Deduplicate consecutive history entries that have the same command.
@@ -134,7 +148,7 @@ impl HistEntry {
 
 impl Display for HistEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}   {}", self.ts_as_string(), self.command)
+        write!(f, "{}  {}", self.ts_as_string(), self.command)
     }
 }
 

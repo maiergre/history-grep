@@ -1,10 +1,11 @@
 [package]
 name = "history-grep"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+description = "A utility for efficient search through (bash) history files"
 
 [profile.release]
-debug = true
+#debug = true
 
 [[bin]]
 name = "hgr"
