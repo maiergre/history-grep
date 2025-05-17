@@ -5,7 +5,9 @@ function __history_grep_readline() {
     local tmpfile
     local cmd
     tmpfile=$(mktemp)
-    hgr --bash-readline-mode ${tmpfile}
+    hgr --bash-readline-mode ${tmpfile} \
+        -v '/(^cd .. ?$)|(^cd - ?$)|(^cdX ?$)/' \
+        -v '/(^ls ?$)|(^ls +-la ?$)/'
     # Note: using $(<tmpfile) breaks bash 
     cmd=$(cat ${tmpfile})
     if [ -n "${cmd}" ]; then

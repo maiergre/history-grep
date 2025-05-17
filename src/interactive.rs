@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use itertools::Itertools;
+use ratatui::Frame;
 use ratatui::crossterm::event::Event;
 use ratatui::crossterm::event::KeyCode;
 use ratatui::crossterm::event::KeyEvent;
@@ -21,14 +22,13 @@ use ratatui::widgets::List;
 use ratatui::widgets::ListItem;
 use ratatui::widgets::ListState;
 use ratatui::widgets::Paragraph;
-use ratatui::Frame;
 use regex::Regex;
-use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
+use tui_input::backend::crossterm::EventHandler;
 
+use crate::CaseMode;
 use crate::histfile::HistEntry;
 use crate::raw_pattern_to_regex;
-use crate::CaseMode;
 
 const HEADER_FOOTER_STYLE: Style = Style::new().fg(Color::White).bg(Color::Blue);
 const SELECTED_STYLE: Style = Style::new()
@@ -205,7 +205,7 @@ impl App<'_> {
                 return HandleKeyRes::Return(None);
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return HandleKeyRes::Return(None)
+                return HandleKeyRes::Return(None);
             }
             KeyCode::Enter => {
                 return HandleKeyRes::Return(self.filtered_entries.get_selected());
