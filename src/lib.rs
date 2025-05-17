@@ -70,9 +70,13 @@ pub struct Args {
     #[arg(short = 'i', long, conflicts_with = "copy")]
     interactive: bool,
 
-    /// This is supposed to help to integrate with bash's `bind -x` readline support, but
-    /// it's not working right.
-    #[arg(long, conflicts_with = "copy")]
+    /// For integration with bash's `bind -x` readline support.
+    ///
+    /// hgr is started in interactive mode and the search term(s) are seeded
+    /// with the contents of the `READLINE_LINE` env variable. If an entry is selected
+    /// its written to the file `TMPFILE`. The selected entry is *not* written to
+    /// stdout nor copied to the clipboard.
+    #[arg(long, conflicts_with = "copy", value_name = "TMPFILE")]
     bash_readline_mode: Option<String>,
 
     /// Use case-sensitive search. Default is non-sensitive
@@ -157,7 +161,9 @@ pub fn actual_main() -> Result<(), anyhow::Error> {
     if let Some(output) = args.bash_readline_mode {
         log::debug!("Using bash_readline_mode output file `{}`", output);
         let mut fp = std::fs::File::options()
-            .append(true)
+            .create(true)
+            .truncate(true)
+            .write(true)
             .open(&output)
             .with_context(|| format!("Opening bash-readline-mode output file `{}`", &output))?;
         let initial_search = std::env::var("READLINE_LINE").unwrap_or_default();
