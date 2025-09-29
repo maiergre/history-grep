@@ -10,6 +10,7 @@ use clap::Parser;
 use histfile::dedup_entries;
 use histfile::open_and_parse_history_file;
 use interactive::run_interactive;
+use itertools::Itertools as _;
 use ratatui::crossterm::tty::IsTty as _;
 use regex::Regex;
 use regex::RegexBuilder;
@@ -86,6 +87,10 @@ pub struct Args {
     /// Exclude commands matching these patterns.
     #[arg(short = 'v', long, action=clap::ArgAction::Append, conflicts_with = "copy")]
     exclude: Vec<String>,
+
+    /// Only display the last N *matching* entries
+    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["copy", "interactive"])]
+    tail: Option<usize>,
 
     /// The patterns to search for.
     ///
@@ -187,8 +192,16 @@ pub fn actual_main() -> Result<(), anyhow::Error> {
         }
     } else {
         let inc_patterns = process_magic_patterns(args.patterns, case_mode)?;
-        for (idx, entry) in entries.iter().enumerate() {
-            if entry.matches(&inc_patterns, &excl_patterns) {
+        let iter = entries
+            .iter()
+            .enumerate()
+            .filter(|(_idx, entry)| entry.matches(&inc_patterns, &excl_patterns));
+        if let Some(tail) = args.tail {
+            for (idx, entry) in iter.tail(tail) {
+                println!("{:x} {}", idx, entry);
+            }
+        } else {
+            for (idx, entry) in iter {
                 println!("{:x} {}", idx, entry);
             }
         }
