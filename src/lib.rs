@@ -6,7 +6,6 @@ use anyhow::anyhow;
 use base64::prelude::BASE64_STANDARD;
 use chrono::DateTime;
 use chrono::Utc;
-use clap::Parser;
 use histfile::dedup_entries;
 use histfile::open_and_parse_history_file;
 use interactive::run_interactive;
@@ -88,9 +87,15 @@ pub struct Args {
     #[arg(short = 'v', long, action=clap::ArgAction::Append, conflicts_with = "copy")]
     exclude: Vec<String>,
 
-    /// Only display the last N *matching* entries
-    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["copy", "interactive"])]
+    /// Only display the last N *matching* entries (default is to show only as many entries
+    /// the height of the current terminal on TTYs)
+    #[arg(short = 'n', long, value_name = "N", conflicts_with_all = ["copy", "interactive", "show_all"])]
     tail: Option<usize>,
+
+    /// Show all entries (default is to show only as many entries the height of the
+    /// current terminal on TTYs)
+    #[arg(short = 'a', long, conflicts_with_all = ["copy", "interactive", "tail"])]
+    show_all: bool,
 
     /// The patterns to search for.
     ///
@@ -102,8 +107,7 @@ pub struct Args {
     patterns: Vec<String>,
 }
 
-pub fn actual_main() -> Result<(), anyhow::Error> {
-    let args = Args::parse();
+pub fn actual_main(args: Args) -> Result<(), anyhow::Error> {
     let log_level = match args.debug {
         0 => LogLevelNum::Warn,
         1 => LogLevelNum::Info,
@@ -196,7 +200,19 @@ pub fn actual_main() -> Result<(), anyhow::Error> {
             .iter()
             .enumerate()
             .filter(|(_idx, entry)| entry.matches(&inc_patterns, &excl_patterns));
-        if let Some(tail) = args.tail {
+        let tail = if std::io::stdout().is_tty() && !args.show_all {
+            // we are on a TTY and `--show-all` wasn't used ==> only show as many entries
+            // as fit the height of the terminal
+            ratatui::crossterm::terminal::size()
+                .ok()
+                .map(|(_cols, rows)| rows as usize)
+        } else {
+            // show all entries
+            None
+        }
+        // unless `--tail` is explicitly specified
+        .or(args.tail);
+        if let Some(tail) = tail {
             for (idx, entry) in iter.tail(tail) {
                 println!("{:x} {}", idx, entry);
             }
