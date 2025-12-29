@@ -21,7 +21,7 @@ chrono = "0.4.40"
 clap = { version = "4.5.53", features = ["derive"] }
 itertools = "0.14.0"
 log = "0.4.29"
-ratatui = "0.29.0"
+ratatui = "0.30.0"
 regex = "1.11.1"
 stderrlog = "0.6.0"
 tui-input = "0.14.0"
