@@ -17,7 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0.98"
 base64 = "0.22.1"
-chrono = "0.4.40"
+chrono = "0.4.43"
 clap = { version = "4.5.53", features = ["derive"] }
 itertools = "0.14.0"
 log = "0.4.29"
