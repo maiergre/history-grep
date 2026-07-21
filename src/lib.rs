@@ -174,7 +174,7 @@ pub fn actual_main(args: Args) -> Result<(), anyhow::Error> {
             .truncate(true)
             .write(true)
             .open(&output)
-            .with_context(|| format!("Opening bash-readline-mode output file `{}`", &output))?;
+            .with_context(|| format!("Opening bash-readline-mode output file `{}`", output))?;
         let initial_search = std::env::var("READLINE_LINE").unwrap_or_default();
 
         let selected = run_interactive(entries, initial_search.clone(), excl_patterns, case_mode)?;

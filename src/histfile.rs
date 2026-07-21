@@ -14,7 +14,7 @@ use crate::MIN_REASONABLE_UNIXTIME;
 use crate::default_ts;
 
 pub fn open_and_parse_history_file(histfile: &str) -> anyhow::Result<Vec<HistEntry>> {
-    log::debug!("Reading and parsing history file: {}", &histfile);
+    log::debug!("Reading and parsing history file: {}", histfile);
     let read =
         File::open(histfile).with_context(|| format!("Opening history file: `{}`", histfile))?;
     parse_history_file(read)
